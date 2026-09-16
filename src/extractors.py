@@ -185,13 +185,28 @@ TYPE_TO_EXTENSIONS = {
     "txt": {".txt", ".log", ".csv", ".md", ".json", ".xml", ".ini", ".cfg", ".tsv"},
 }
 
+# Keyed by the lower-case extension (with the leading dot) so a format can
+# never be accepted by TYPE_TO_EXTENSIONS yet silently skipped here.
 _TYPE_TO_EXTRACTOR = {
-    "docx": docx_chunks,
-    "doc": doc_chunks,
-    "xlsx": xlsx_chunks,
-    "xls": xls_chunks,
-    "pdf": pdf_chunks,
-    "txt": txt_chunks,
+    ".docx": docx_chunks,
+    ".doc": doc_chunks,
+    # Macro-enabled and template workbooks share the Open XML layout of .xlsx,
+    # so the same extractor reads them.
+    ".xlsx": xlsx_chunks,
+    ".xlsm": xlsx_chunks,
+    ".xltx": xlsx_chunks,
+    ".xls": xls_chunks,
+    ".pdf": pdf_chunks,
+    ".txt": txt_chunks,
+    # Plain-text variants are read line by line, exactly like .txt.
+    ".log": txt_chunks,
+    ".csv": txt_chunks,
+    ".tsv": txt_chunks,
+    ".md": txt_chunks,
+    ".json": txt_chunks,
+    ".xml": txt_chunks,
+    ".ini": txt_chunks,
+    ".cfg": txt_chunks,
 }
 
 
@@ -201,7 +216,5 @@ def chunks_for_path(path: str):
     Returns ``None`` when the format has no registered extractor.
     """
     extension = os.path.splitext(path)[1].lower()
-    extractor = _TYPE_TO_EXTRACTOR.get(extension.lstrip("."))
-    if extractor is None:
-        return None
-    return extractor(path)
+    extractor = _TYPE_TO_EXTRACTOR.get(extension)
+    return extractor(path) if extractor else None
