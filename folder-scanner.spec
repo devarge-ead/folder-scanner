@@ -12,10 +12,9 @@ from PyInstaller.utils.hooks import collect_all
 
 ROOT = os.path.abspath(SPECPATH)
 
-# Bundle the application icon and the loading animation next to the executable.
+# Bundle the application icon next to the executable.
 datas = [
     (os.path.join(ROOT, "assets", "app.ico"), "assets"),
-    (os.path.join(ROOT, "assets", "loading-animation.webm"), "assets"),
 ]
 
 # Collect data / binary modules for the document libraries.

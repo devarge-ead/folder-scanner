@@ -13,7 +13,15 @@ def matches(query: str, text: str, method: str, threshold: int) -> bool:
         return False
     q = normalize(query)
     if method == "fuzzy":
-        return fuzz.partial_ratio(q, normalize(text)) >= threshold
+        t = normalize(text)
+        # ``partial_ratio`` aligns the *shorter* string inside the longer one,
+        # so a very short text (e.g. a spreadsheet cell "no") scores 100
+        # against a much longer query ("musteri no") even when unrelated.
+        # Guard: when the text is shorter than the query, compare with a
+        # symmetric full-similarity ratio instead.
+        if len(t) < len(q):
+            return fuzz.ratio(q, t) >= threshold
+        return fuzz.partial_ratio(q, t) >= threshold
     return q in normalize(text)
 
 

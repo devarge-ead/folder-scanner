@@ -1,7 +1,10 @@
 """Main application window and widgets.
 
-Implements the left folder tree (with per-item checkboxes and first-level child
-expansion), the right settings panel, the results table and the loading video.
+Implements the left folder list (a flat, non-collapsible tree with per-item
+checkboxes), the right settings panel, the results table and the loading video.
+
+Only the folders whose checkbox is ticked are handed to the scanner, so the
+checkbox list is the single source of truth for what gets searched.
 """
 
 import os
@@ -16,6 +19,7 @@ from PySide6.QtWidgets import (
     QDialog,
     QFileDialog,
     QHBoxLayout,
+    QHeaderView,
     QLabel,
     QLineEdit,
     QMainWindow,
@@ -25,6 +29,7 @@ from PySide6.QtWidgets import (
     QRadioButton,
     QSlider,
     QSplitter,
+    QStyledItemDelegate,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -45,9 +50,21 @@ COL_LOCATIONS = 3
 
 # Tree item data roles.
 ROLE_PATH = Qt.UserRole
-ROLE_POPULATED = Qt.UserRole + 1
 
 _PRIMARY = "#043c59"
+
+
+class _MultilineDelegate(QStyledItemDelegate):
+    """Item delegate that lets multi-line cell text wrap.
+
+    Table cells elide to a single line by default, which would hide every
+    location after the first one. Turning the elide mode off lets the text
+    wrap and the row grow.
+    """
+
+    def initStyleOption(self, option, index):
+        super().initStyleOption(option, index)
+        option.textElideMode = Qt.TextElideMode.ElideNone
 
 
 def resource_path(relative: str) -> str:
@@ -149,10 +166,14 @@ class MainWindow(QMainWindow):
 
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
-        self.tree.setIndentation(12)
+        # Flat, non-collapsible list: no branch column, no expand/collapse
+        # arrows and no child items. Added folders therefore never reveal
+        # their subfolders in this panel.
+        self.tree.setIndentation(0)
+        self.tree.setRootIsDecorated(False)
+        self.tree.setItemsExpandable(False)
         self.tree.setSortingEnabled(True)
         self.tree.sortByColumn(0, Qt.SortOrder.AscendingOrder)
-        self.tree.itemExpanded.connect(self._on_item_expanded)
         self.tree.itemChanged.connect(self._on_item_check_changed)
         vbox.addWidget(self.tree, 1)
 
@@ -287,6 +308,13 @@ class MainWindow(QMainWindow):
         self.results.setColumnWidth(COL_COUNT, 90)
         self.results.setColumnWidth(COL_LOCATIONS, 360)
         self.results.setAlternatingRowColors(True)
+        # The locations cell holds one match per line: wrap instead of eliding
+        # and let the rows grow with their content.
+        self.results.setWordWrap(True)
+        self.results.verticalHeader().setSectionResizeMode(
+            QHeaderView.ResizeMode.ResizeToContents)
+        self.results.setItemDelegateForColumn(COL_LOCATIONS,
+                                              _MultilineDelegate(self.results))
         self.results.cellDoubleClicked.connect(self._on_open_result)
 
         frame = QWidget()
@@ -388,8 +416,10 @@ class MainWindow(QMainWindow):
         self._loading_tree = True
         for entry in self.state.get("folders", []):
             path = entry.get("path")
+            # A folder is only scanned when it was explicitly ticked, so a
+            # missing "checked" key is treated as unchecked.
             if path and os.path.isdir(path):
-                self._add_tree_item(path, bool(entry.get("checked", True)))
+                self._add_tree_item(path, bool(entry.get("checked", False)))
         self._loading_tree = False
 
     def _add_folder(self):
@@ -409,38 +439,24 @@ class MainWindow(QMainWindow):
         self._upsert_state_folder(path, True)
         self._save_settings()
 
-    def _add_tree_item(self, path, checked, parent=None):
+    def _add_tree_item(self, path, checked):
+        """Add one top-level, non-expandable folder entry to the list."""
         item = QTreeWidgetItem()
         item.setText(0, os.path.basename(path) or path)
         item.setToolTip(0, os.path.normpath(path))
         item.setData(0, ROLE_PATH, os.path.normpath(path))
-        item.setData(1, ROLE_POPULATED, "0")
         flags = item.flags() | Qt.ItemFlag.ItemIsUserCheckable
         item.setFlags(flags)
         item.setCheckState(0, Qt.CheckState.Checked if checked
                            else Qt.CheckState.Unchecked)
-        # Show a collapse/expand arrow whenever the folder has subfolders.
-        if self._has_subdirs(path):
-            item.setChildIndicatorPolicy(
-                QTreeWidgetItem.ChildIndicatorPolicy.ShowIndicator)
-        else:
-            item.setChildIndicatorPolicy(
-                QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicator)
-        if parent is None:
-            self.tree.addTopLevelItem(item)
-        else:
-            parent.addChild(item)
+        # Folders are shown as a flat, non-collapsible list: never display an
+        # expand/collapse arrow so an added folder never reveals its
+        # subfolders in the panel.
+        item.setChildIndicatorPolicy(
+            QTreeWidgetItem.ChildIndicatorPolicy.DontShowIndicator)
+        item.setExpanded(False)
+        self.tree.addTopLevelItem(item)
         return item
-
-    @staticmethod
-    def _has_subdirs(path):
-        if not os.path.isdir(path):
-            return False
-        try:
-            return any(os.path.isdir(os.path.join(path, name))
-                       for name in os.listdir(path))
-        except OSError:
-            return False
 
     def _remove_folder(self):
         selected = self.tree.selectedItems()
@@ -450,26 +466,15 @@ class MainWindow(QMainWindow):
                                       self.i18n.t("confirm_remove"))
         if answer != QMessageBox.StandardButton.Yes:
             return
-        paths = set()
+        paths = {item.data(0, ROLE_PATH) for item in selected}
+        paths.discard(None)
         for item in selected:
-            self._collect_paths(item, paths)
             index = self.tree.indexOfTopLevelItem(item)
             if index >= 0:
                 self.tree.takeTopLevelItem(index)
-            else:
-                parent = item.parent()
-                if parent is not None:
-                    parent.removeChild(item)
         self.state["folders"] = [f for f in self.state["folders"]
                                  if f.get("path") not in paths]
         self._save_settings()
-
-    def _collect_paths(self, item, acc):
-        path = item.data(0, ROLE_PATH)
-        if path:
-            acc.add(path)
-        for i in range(item.childCount()):
-            self._collect_paths(item.child(i), acc)
 
     def _upsert_state_folder(self, path, checked):
         path = os.path.normpath(path)
@@ -478,33 +483,6 @@ class MainWindow(QMainWindow):
                 entry["checked"] = checked
                 return
         self.state["folders"].append({"path": path, "checked": checked})
-
-    def _on_item_expanded(self, item):
-        if self._loading_tree:
-            return
-        path = item.data(0, ROLE_PATH)
-        if not path or item.data(1, ROLE_POPULATED) == "1":
-            return
-        item.setData(1, ROLE_POPULATED, "1")
-        if not os.path.isdir(path):
-            return
-        try:
-            names = sorted(os.listdir(path))
-        except OSError:
-            return
-        self._loading_tree = True
-        for name in names:
-            child_path = os.path.normpath(os.path.join(path, name))
-            if os.path.isdir(child_path):
-                checked = self._saved_checked(child_path)
-                self._add_tree_item(child_path, checked, item)
-        self._loading_tree = False
-
-    def _saved_checked(self, path):
-        for entry in self.state["folders"]:
-            if entry.get("path") == os.path.normpath(path):
-                return bool(entry.get("checked", True))
-        return True
 
     def _on_item_check_changed(self, item, column):
         if self._loading_tree or column != 0:
@@ -517,19 +495,21 @@ class MainWindow(QMainWindow):
         self._save_settings()
 
     def _scan_roots(self):
+        """Return ``(path, checked)`` for every folder shown in the panel.
+
+        The panel is a flat list, so only the top-level entries are read; each
+        entry contributes its own checkbox state.
+        """
         folders = []
         root = self.tree.invisibleRootItem()
         for i in range(root.childCount()):
-            self._collect_tree_item(root.child(i), folders)
-        return folders
-
-    def _collect_tree_item(self, item, acc):
-        path = item.data(0, ROLE_PATH)
-        if path:
+            item = root.child(i)
+            path = item.data(0, ROLE_PATH)
+            if not path:
+                continue
             enabled = item.checkState(0) == Qt.CheckState.Checked
-            acc.append((path, enabled))
-        for i in range(item.childCount()):
-            self._collect_tree_item(item.child(i), acc)
+            folders.append((path, enabled))
+        return folders
 
     # ------------------------------------------------------------------ #
     # Scan control & results

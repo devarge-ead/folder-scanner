@@ -13,8 +13,9 @@ from PySide6.QtCore import QThread, Signal
 from . import extractors
 from .matching import count_exact, matches
 
-# Cap on how many distinct locations are reported per file row.
-_MAX_LOCATIONS = 20
+# How many distinct locations are listed per file row. When a file has more
+# matches than this, the locations cell ends with a "+N more" line.
+_MAX_LOCATIONS = 10
 
 
 def _is_within(path, parent):
@@ -27,9 +28,14 @@ def _is_within(path, parent):
 def _select_scan_roots(folders):
     """Return the highest-level enabled folders (deduplicated vs. descendants).
 
-    ``folders`` is a list of ``(path, enabled)``. When a parent folder is enabled
-    its enabled descendants are redundant (the parent scan already covers them),
-    so only the top-most enabled folders are returned.
+    ``folders`` is a list of ``(path, enabled)`` taken from the folder panel,
+    where ``enabled`` mirrors the item's checkbox. Folders whose checkbox is
+    clear are dropped here, so only ticked folders are ever scanned.
+
+    Because the panel is a flat list, a folder can be added directly *and* be a
+    descendant of another added folder. In that case the parent scan already
+    covers the child, so only the top-most enabled folders are returned and no
+    file is visited twice.
     """
     enabled = [path for path, on in folders if on]
     roots = []
@@ -140,7 +146,7 @@ class ScanWorker(QThread):
             "file": base_name,
             "path": path,
             "count": total,
-            "locations": self._join_locations(locations),
+            "locations": self._format_locations(locations),
         }
 
     @staticmethod
@@ -181,8 +187,15 @@ class ScanWorker(QThread):
             return value
         return str(value)
 
-    @staticmethod
-    def _join_locations(locations):
-        if len(locations) <= _MAX_LOCATIONS:
-            return ", ".join(locations)
-        return ", ".join(locations[:_MAX_LOCATIONS]) + " +…"
+    def _format_locations(self, locations):
+        """Render the matched locations of one file as multi-line cell text.
+
+        Every location is written on its own line. At most ``_MAX_LOCATIONS``
+        entries are listed; when there are more, a final line reports how many
+        further matches were left out (e.g. "+2 more").
+        """
+        lines = list(locations[:_MAX_LOCATIONS])
+        hidden = len(locations) - len(lines)
+        if hidden > 0:
+            lines.append(self._i18n.tr("more", n=hidden))
+        return "\n".join(lines)
