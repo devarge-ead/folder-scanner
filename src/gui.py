@@ -39,6 +39,7 @@ from PySide6.QtWidgets import (
 )
 
 from . import storage
+from .excel_view import ExcelQuickView, is_excel_path
 from .i18n import I18n, LANGUAGES
 from .scanner import ScanWorker, _select_scan_roots
 
@@ -131,6 +132,11 @@ class MainWindow(QMainWindow):
         self._worker = None
         self._loading_tree = False
         self._result_count = 0
+        # Parameters of the most recent search, reused by the Excel Quick View
+        # to highlight exactly the same matches that produced a result row.
+        self._last_query = ""
+        self._last_method = "exact"
+        self._last_threshold = 85
 
         self._build_ui()
         self._apply_ui_language()
@@ -538,6 +544,12 @@ class MainWindow(QMainWindow):
         self._set_scanning(True)
         self._start_loading()
 
+        # Remember what was searched so the Excel Quick View can highlight the
+        # same matches when a spreadsheet row is double-clicked.
+        self._last_query = query
+        self._last_method = method
+        self._last_threshold = self.slider_threshold.value()
+
         self._worker = ScanWorker(
             scan_roots, query, method, self.slider_threshold.value(),
             file_types, self.i18n)
@@ -599,13 +611,67 @@ class MainWindow(QMainWindow):
         self.button_stop.setEnabled(active)
 
     def _on_open_result(self, row, _col):
+        """Handle a double-click on a result row.
+
+        Word/PDF/TXT rows keep the old behaviour and open in the default
+        application. Spreadsheet rows instead ask whether the user wants the
+        in-app Quick View or to open the file in Excel.
+        """
         if self._worker is not None:
             return
         item = self.results.item(row, COL_FILE)
         if item is None:
             return
         path = item.data(Qt.ItemDataRole.UserRole)
-        if path and os.path.exists(path):
+        if not path or not os.path.exists(path):
+            return
+
+        if is_excel_path(path):
+            choice = self._ask_open_choice(path)
+            if choice == "quick_view":
+                self._open_quick_view(path)
+                return
+            if choice == "excel":
+                QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+                return
+            return  # dialog dismissed: do nothing
+
+        QDesktopServices.openUrl(QUrl.fromLocalFile(path))
+
+    def _ask_open_choice(self, path):
+        """Ask how to open an Excel file: Quick View or the default app.
+
+        Returns ``"quick_view"``, ``"excel"`` or ``None`` when dismissed.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Icon.Question)
+        box.setWindowTitle(self.i18n.t("open_choice_title"))
+        box.setText(self.i18n.t("open_choice_text",
+                                name=os.path.basename(path)))
+        quick_button = box.addButton(
+            self.i18n.t("quick_view"), QMessageBox.ButtonRole.AcceptRole)
+        excel_button = box.addButton(
+            self.i18n.t("open_in_excel"), QMessageBox.ButtonRole.ActionRole)
+        box.setDefaultButton(quick_button)
+        box.exec()
+        clicked = box.clickedButton()
+        if clicked is quick_button:
+            return "quick_view"
+        if clicked is excel_button:
+            return "excel"
+        return None
+
+    def _open_quick_view(self, path):
+        """Show the in-app Excel Quick View, falling back to the default app."""
+        try:
+            dialog = ExcelQuickView(
+                path, self._last_query, self._last_method,
+                self._last_threshold, self.i18n, self)
+            dialog.exec()
+        except Exception:
+            # A corrupt workbook or a missing reader must never block the user.
+            QMessageBox.warning(self, self.i18n.t("app_title"),
+                                self.i18n.t("open_error", path=path))
             QDesktopServices.openUrl(QUrl.fromLocalFile(path))
 
     # ------------------------------------------------------------------ #
